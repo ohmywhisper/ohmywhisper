@@ -16,6 +16,7 @@ jobs:
             goarch: amd64
             cc: gcc
             cxx: g++
+            extra_ldflags: -lgomp
           - arch: arm64
             goarch: arm64
             cc: aarch64-linux-gnu-gcc
@@ -54,7 +55,9 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
           CC: ${{ matrix.cc }}
-        run: go build -o bin/ohmywhisper ./cmd/
+        run: |
+          CGO_LDFLAGS="-L$GITHUB_WORKSPACE/lib -Wl,--start-group -lwhisper -lggml -lggml-cpu -lggml-base -Wl,--end-group -lstdc++ ${{ matrix.extra_ldflags }} -lm -lpthread" \
+          go build -o bin/ohmywhisper ./cmd/
 
       - name: Package
         run: zip ohmywhisper_linux_${{ matrix.arch }}.zip bin/ohmywhisper
