@@ -54,12 +54,25 @@ jobs:
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
-          CC: ${{ matrix.cc }}
         run: |
           LIBDIR="$GITHUB_WORKSPACE/lib"
-          go build \
-            -ldflags "-extldflags '-L${LIBDIR} -Wl,--start-group -lwhisper -lggml -lggml-cpu -lggml-base -Wl,--end-group -lstdc++ ${{ matrix.extra_ldflags }} -lm -lpthread'" \
-            -o bin/ohmywhisper ./cmd/
+          CC_REAL="${{ matrix.cc }}"
+          EXTRA="${{ matrix.extra_ldflags }}"
+
+          {
+            echo '#!/bin/bash'
+            echo "LINK_FLAGS=\"-L${LIBDIR} -Wl,--start-group -lwhisper -lggml -lggml-cpu -lggml-base -Wl,--end-group -lstdc++ ${EXTRA} -lm -lpthread\""
+            echo 'IS_LINK=1'
+            echo 'for a in "$@"; do [ "$a" = "-c" ] && IS_LINK=0; done'
+            echo "if [ \$IS_LINK -eq 1 ]; then"
+            echo "  exec ${CC_REAL} \"\$@\" \$LINK_FLAGS"
+            echo "else"
+            echo "  exec ${CC_REAL} \"\$@\""
+            echo "fi"
+          } > /tmp/cc-wrap
+          chmod +x /tmp/cc-wrap
+
+          CC=/tmp/cc-wrap go build -o bin/ohmywhisper ./cmd/
 
       - name: Package
         run: zip ohmywhisper_linux_${{ matrix.arch }}.zip bin/ohmywhisper
