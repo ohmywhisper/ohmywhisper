@@ -56,8 +56,10 @@ jobs:
           GOARM: ${{ matrix.goarm }}
           CC: ${{ matrix.cc }}
         run: |
-          CGO_LDFLAGS="-L$GITHUB_WORKSPACE/lib -Wl,--start-group -lwhisper -lggml -lggml-cpu -lggml-base -Wl,--end-group -lstdc++ ${{ matrix.extra_ldflags }} -lm -lpthread" \
-          go build -o bin/ohmywhisper ./cmd/
+          LIBDIR="$GITHUB_WORKSPACE/lib"
+          go build \
+            -ldflags "-extldflags '-L${LIBDIR} -Wl,--start-group -lwhisper -lggml -lggml-cpu -lggml-base -Wl,--end-group -lstdc++ ${{ matrix.extra_ldflags }} -lm -lpthread'" \
+            -o bin/ohmywhisper ./cmd/
 
       - name: Package
         run: zip ohmywhisper_linux_${{ matrix.arch }}.zip bin/ohmywhisper
