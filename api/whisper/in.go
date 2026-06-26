@@ -2,6 +2,7 @@ package whisper
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/../../lib/include
+#cgo LDFLAGS: -L${SRCDIR}/../../lib -Wl,--start-group -lwhisper -lggml -lggml-cpu -lggml-base -Wl,--end-group -lstdc++ -lm -lpthread
 #include "whisper.h"
 #include <stdlib.h>
 */
