@@ -74,7 +74,12 @@ jobs:
           CC=/tmp/cc-wrap go build -o bin/ohmywhisper ./cmd/
 
       - name: Package
-        run: zip ohmywhisper_linux_${{ matrix.arch }}.zip bin/ohmywhisper
+        run: |
+          mkdir -p dist/lib
+          cp bin/ohmywhisper dist/
+          cp lib/*.a dist/lib/
+          cp -r lib/include dist/lib/
+          cd dist && zip -r ../ohmywhisper_linux_${{ matrix.arch }}.zip .
 
       - uses: actions/upload-artifact@v4
         with:
