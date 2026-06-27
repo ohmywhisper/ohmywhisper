@@ -81,7 +81,5 @@ curl http://localhost:3199/v1/audio/transcriptions \
 
 ## Going on
 
-- GPU support
 - Streaming response
 - Multiple models
-- Web UI
