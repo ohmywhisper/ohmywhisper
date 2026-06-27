@@ -13,14 +13,16 @@ import (
 	"github.com/gin-gonic/gin"
 	whisperlib "ohmywhisper/api/whisper"
 	"ohmywhisper/format"
+	"ohmywhisper/model"
+	"ohmywhisper/sysinfo"
 )
 
 type Client struct {
-	engine *whisperlib.Engine
+	pool *model.Pool
 }
 
-func NewClient(e *whisperlib.Engine) *Client {
-	return &Client{engine: e}
+func NewClient(pool *model.Pool) *Client {
+	return &Client{pool: pool}
 }
 
 func (c *Client) transcribeAudio(ctx *gin.Context, translate bool) {
@@ -36,7 +38,6 @@ func (c *Client) transcribeAudio(ctx *gin.Context, translate bool) {
 	if respFmt == "" {
 		respFmt = "json"
 	}
-
 	wordTS := false
 	for _, g := range ctx.PostFormArray("timestamp_granularities[]") {
 		if g == "word" {
@@ -45,7 +46,20 @@ func (c *Client) transcribeAudio(ctx *gin.Context, translate bool) {
 		}
 	}
 
-	if translate && !c.engine.IsMultilingual() {
+	modelName := strings.TrimSpace(ctx.PostForm("model"))
+	var lm *model.LoadedModel
+	if modelName != "" {
+		lm, err = c.pool.Get(modelName)
+	} else {
+		lm, err = c.pool.Default()
+	}
+	if err != nil {
+		ctx.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+		return
+	}
+	engine := lm.Engine()
+
+	if translate && !engine.IsMultilingual() {
 		ctx.JSON(http.StatusUnprocessableEntity, gin.H{"error": "model does not support translation"})
 		return
 	}
@@ -101,9 +115,9 @@ func (c *Client) transcribeAudio(ctx *gin.Context, translate bool) {
 	)
 
 	if translate {
-		text, segs, err = c.engine.Translate(samples, wordTS)
+		text, segs, err = engine.Translate(samples, wordTS)
 	} else {
-		text, segs, err = c.engine.Transcribe(samples, lang, wordTS)
+		text, segs, err = engine.Transcribe(samples, lang, wordTS)
 	}
 	if err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -142,9 +156,9 @@ func (c *Client) transcribeAudio(ctx *gin.Context, translate bool) {
 			Duration: duration,
 			Text:     text,
 			Model: format.ModelInfo{
-				ID:           c.engine.ModelID(),
+				ID:           engine.ModelID(),
 				Object:       "model",
-				Multilingual: c.engine.IsMultilingual(),
+				Multilingual: engine.IsMultilingual(),
 			},
 			Segments: fmtSegs,
 		})
@@ -162,14 +176,72 @@ func (c *Client) Translate(ctx *gin.Context) {
 }
 
 func (c *Client) Models(ctx *gin.Context) {
-	ctx.JSON(http.StatusOK, format.ModelListResponse{
-		Object: "list",
-		Data: []format.ModelInfo{{
-			ID:           c.engine.ModelID(),
+	loaded := c.pool.List()
+	data := make([]format.ModelInfo, 0, len(loaded))
+	for _, m := range loaded {
+		e := m.Engine()
+		if e == nil {
+			continue
+		}
+		data = append(data, format.ModelInfo{
+			ID:           m.Name,
 			Object:       "model",
-			Multilingual: c.engine.IsMultilingual(),
-		}},
+			Multilingual: e.IsMultilingual(),
+		})
+	}
+	ctx.JSON(http.StatusOK, format.ModelListResponse{Object: "list", Data: data})
+}
+
+type psEntry struct {
+	Name  string `json:"name"`
+	Path  string `json:"path"`
+	Since string `json:"since"`
+}
+
+type psResponse struct {
+	Models []psEntry       `json:"models"`
+	RSSMB  int64           `json:"rss_mb"`
+	CPUPct float64         `json:"cpu_pct"`
+	GPU    *sysinfo.GPUInfo `json:"gpu,omitempty"`
+}
+
+func (c *Client) PS(ctx *gin.Context) {
+	loaded := c.pool.List()
+	entries := make([]psEntry, len(loaded))
+	for i, m := range loaded {
+		entries[i] = psEntry{Name: m.Name, Path: m.Path, Since: m.Since.Format("2006-01-02 15:04:05")}
+	}
+	stats := sysinfo.Collect()
+	ctx.JSON(http.StatusOK, psResponse{
+		Models: entries,
+		RSSMB:  stats.RSSMB,
+		CPUPct: stats.CPUPct,
+		GPU:    stats.GPU,
 	})
+}
+
+func (c *Client) Load(ctx *gin.Context) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := ctx.ShouldBindJSON(&req); err != nil || req.Name == "" {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "name required"})
+		return
+	}
+	if err := c.pool.Load(req.Name); err != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	ctx.JSON(http.StatusOK, gin.H{"status": "loaded", "name": req.Name})
+}
+
+func (c *Client) Unload(ctx *gin.Context) {
+	name := ctx.Param("name")
+	if err := c.pool.Unload(name); err != nil {
+		ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	ctx.JSON(http.StatusOK, gin.H{"status": "unloaded", "name": name})
 }
 
 func Serve(c *Client, port int, middleware ...gin.HandlerFunc) error {
@@ -182,6 +254,9 @@ func Serve(c *Client, port int, middleware ...gin.HandlerFunc) error {
 	r.POST("/v1/audio/transcriptions", c.Transcribe)
 	r.POST("/v1/audio/translations", c.Translate)
 	r.GET("/v1/models", c.Models)
+	r.GET("/api/ps", c.PS)
+	r.POST("/api/load", c.Load)
+	r.DELETE("/api/unload/:name", c.Unload)
 	return r.Run(fmt.Sprintf("0.0.0.0:%d", port))
 }
 

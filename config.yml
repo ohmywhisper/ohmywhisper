@@ -1,0 +1,4 @@
+model_dir: ~/.ohmywhisper/models
+hub: https://huggingface.co/ggerganov/whisper.cpp/resolve/main
+server_url: http://localhost:3199
+whisper_src: ""
