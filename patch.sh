@@ -51,7 +51,9 @@ if [ "$GPU_BACKEND" = "auto" ]; then
         GPU_BACKEND="cuda"
     elif command -v hipcc &>/dev/null || [ -d "/opt/rocm" ]; then
         GPU_BACKEND="rocm"
-    elif command -v vulkaninfo &>/dev/null || ldconfig -p 2>/dev/null | grep -q libvulkan; then
+    elif command -v glslc &>/dev/null && \
+         { [ -f "/usr/include/vulkan/vulkan.h" ] || [ -f "/usr/local/include/vulkan/vulkan.h" ]; } && \
+         ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so'; then
         GPU_BACKEND="vulkan"
     else
         GPU_BACKEND="cpu"
