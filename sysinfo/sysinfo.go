@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -24,13 +26,26 @@ type Stats struct {
 
 var cpuCache struct {
 	sync.Mutex
-	pct  float64
-	at   time.Time
+	pct float64
+	at  time.Time
 }
 
 var gpuCache struct {
 	sync.Mutex
 	info *GPUInfo
+	at   time.Time
+}
+
+var tempCache struct {
+	sync.Mutex
+	temps map[string]float64
+	at    time.Time
+}
+
+var netSpeedCache struct {
+	sync.Mutex
+	rxPS int64
+	txPS int64
 	at   time.Time
 }
 
@@ -60,6 +75,72 @@ func ProcessRSSMB() int64 {
 		}
 	}
 	return 0
+}
+
+func CPUThreads() int {
+	f, err := os.Open("/proc/cpuinfo")
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	count := 0
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		if strings.HasPrefix(sc.Text(), "processor") {
+			count++
+		}
+	}
+	return count
+}
+
+func CPUTempCelsius() map[string]float64 {
+	tempCache.Lock()
+	defer tempCache.Unlock()
+	if time.Since(tempCache.at) < 5*time.Second {
+		return tempCache.temps
+	}
+	temps := map[string]float64{}
+	zones, _ := filepath.Glob("/sys/class/thermal/thermal_zone*/temp")
+	for _, zone := range zones {
+		data, err := os.ReadFile(zone)
+		if err != nil {
+			continue
+		}
+		v, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+		if err != nil {
+			continue
+		}
+		name := filepath.Base(filepath.Dir(zone))
+		temps[name] = float64(v) / 1000.0
+	}
+	tempCache.temps = temps
+	tempCache.at = time.Now()
+	return temps
+}
+
+func NetworkSpeed() (rxPS, txPS int64) {
+	netSpeedCache.Lock()
+	defer netSpeedCache.Unlock()
+	if time.Since(netSpeedCache.at) < 5*time.Second {
+		return netSpeedCache.rxPS, netSpeedCache.txPS
+	}
+	rx1, tx1 := readNetBytes()
+	time.Sleep(200 * time.Millisecond)
+	rx2, tx2 := readNetBytes()
+	netSpeedCache.rxPS = (rx2 - rx1) * 5
+	netSpeedCache.txPS = (tx2 - tx1) * 5
+	netSpeedCache.at = time.Now()
+	return netSpeedCache.rxPS, netSpeedCache.txPS
+}
+
+func DiskStats(path string) (used, free int64) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return 0, 0
+	}
+	total := int64(stat.Blocks) * int64(stat.Bsize)
+	avail := int64(stat.Bavail) * int64(stat.Bsize)
+	return total - avail, avail
 }
 
 func cachedCPUPct() float64 {
@@ -118,6 +199,29 @@ func procCPUTicks() (utime, stime int64) {
 	}
 	utime, _ = strconv.ParseInt(fields[11], 10, 64)
 	stime, _ = strconv.ParseInt(fields[12], 10, 64)
+	return
+}
+
+func readNetBytes() (rx, tx int64) {
+	f, err := os.Open("/proc/net/dev")
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.Contains(line, ":") {
+			continue
+		}
+		fields := strings.Fields(strings.SplitN(line, ":", 2)[1])
+		if len(fields) >= 9 {
+			r, _ := strconv.ParseInt(fields[0], 10, 64)
+			t, _ := strconv.ParseInt(fields[8], 10, 64)
+			rx += r
+			tx += t
+		}
+	}
 	return
 }
 

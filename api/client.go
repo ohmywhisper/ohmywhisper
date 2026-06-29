@@ -10,20 +10,27 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	whisperlib "ohmywhisper/api/whisper"
+	"ohmywhisper/config"
 	"ohmywhisper/format"
 	"ohmywhisper/model"
 	"ohmywhisper/sysinfo"
 )
 
 type Client struct {
-	pool *model.Pool
+	pool        *model.Pool
+	cfg         *config.Config
+	reqTotal    atomic.Int64
+	audioMillis atomic.Int64
+	procMillis  atomic.Int64
 }
 
-func NewClient(pool *model.Pool) *Client {
-	return &Client{pool: pool}
+func NewClient(pool *model.Pool, cfg *config.Config) *Client {
+	return &Client{pool: pool, cfg: cfg}
 }
 
 func (c *Client) transcribeAudio(ctx *gin.Context, translate bool) {
@@ -109,9 +116,10 @@ func (c *Client) transcribeAudio(ctx *gin.Context, translate bool) {
 	}
 
 	samples := bytesToFloat32(pcmData)
+	audioDurMs := int64(float64(len(samples)) / 16000.0 * 1000)
 
 	if ctx.PostForm("stream") == "true" {
-		c.streamSegments(ctx, translate, engine, samples, lang, wordTS)
+		c.streamSegments(ctx, translate, engine, samples, lang, wordTS, audioDurMs)
 		return
 	}
 
@@ -120,11 +128,15 @@ func (c *Client) transcribeAudio(ctx *gin.Context, translate bool) {
 		segs []whisperlib.Segment
 	)
 
+	t0 := time.Now()
 	if translate {
 		text, segs, err = engine.Translate(samples, wordTS)
 	} else {
 		text, segs, err = engine.Transcribe(samples, lang, wordTS)
 	}
+	c.audioMillis.Add(audioDurMs)
+	c.procMillis.Add(time.Since(t0).Milliseconds())
+
 	if err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -173,7 +185,7 @@ func (c *Client) transcribeAudio(ctx *gin.Context, translate bool) {
 	}
 }
 
-func (c *Client) streamSegments(ctx *gin.Context, translate bool, engine *whisperlib.Engine, samples []float32, lang string, wordTS bool) {
+func (c *Client) streamSegments(ctx *gin.Context, translate bool, engine *whisperlib.Engine, samples []float32, lang string, wordTS bool, audioDurMs int64) {
 	ctx.Header("Content-Type", "text/event-stream")
 	ctx.Header("Cache-Control", "no-cache")
 	ctx.Header("Connection", "keep-alive")
@@ -207,12 +219,15 @@ func (c *Client) streamSegments(ctx *gin.Context, translate bool, engine *whispe
 		send(ev)
 	}
 
+	t0 := time.Now()
 	var err error
 	if translate {
 		err = engine.TranslateStream(samples, wordTS, cb)
 	} else {
 		err = engine.TranscribeStream(samples, lang, wordTS, cb)
 	}
+	c.audioMillis.Add(audioDurMs)
+	c.procMillis.Add(time.Since(t0).Milliseconds())
 
 	if err != nil {
 		send(map[string]any{"type": "error", "error": err.Error()})
@@ -253,6 +268,133 @@ func (c *Client) Models(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, format.ModelListResponse{Object: "list", Data: data})
 }
 
+func (c *Client) Tags(ctx *gin.Context) {
+	models, err := model.List(c.cfg)
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	type tagModel struct {
+		Name       string `json:"name"`
+		Size       int64  `json:"size"`
+		ModifiedAt string `json:"modified_at"`
+	}
+	tags := make([]tagModel, len(models))
+	for i, m := range models {
+		tags[i] = tagModel{
+			Name:       m.Name,
+			Size:       m.Size,
+			ModifiedAt: m.ModTime.Format(time.RFC3339),
+		}
+	}
+	ctx.JSON(http.StatusOK, gin.H{"models": tags})
+}
+
+func (c *Client) PullModel(ctx *gin.Context) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := ctx.ShouldBindJSON(&req); err != nil || req.Name == "" {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "name required"})
+		return
+	}
+
+	ctx.Header("Content-Type", "text/event-stream")
+	ctx.Header("Cache-Control", "no-cache")
+	ctx.Header("Connection", "keep-alive")
+	ctx.Header("X-Accel-Buffering", "no")
+	ctx.Writer.WriteHeader(http.StatusOK)
+
+	send := func(v any) {
+		b, _ := json.Marshal(v)
+		fmt.Fprintf(ctx.Writer, "data: %s\n\n", b)
+		ctx.Writer.Flush()
+	}
+
+	err := model.PullWithProgress(req.Name, c.cfg, func(label string, written, total int64) {
+		send(map[string]any{
+			"type":    "progress",
+			"label":   label,
+			"written": written,
+			"total":   total,
+		})
+	})
+	if err != nil {
+		send(map[string]any{"type": "error", "error": err.Error()})
+		return
+	}
+	send(map[string]any{"type": "done", "name": req.Name})
+}
+
+func (c *Client) Metrics(ctx *gin.Context) {
+	var sb strings.Builder
+
+	gauge := func(name, help string, val float64, label ...string) {
+		fmt.Fprintf(&sb, "# HELP %s %s\n# TYPE %s gauge\n", name, help, name)
+		if len(label) > 0 {
+			fmt.Fprintf(&sb, "%s{%s} %g\n", name, strings.Join(label, ","), val)
+		} else {
+			fmt.Fprintf(&sb, "%s %g\n", name, val)
+		}
+	}
+
+	counter := func(name, help string, val float64) {
+		fmt.Fprintf(&sb, "# HELP %s %s\n# TYPE %s counter\n%s %g\n", name, help, name, name, val)
+	}
+
+	allModels, _ := model.List(c.cfg)
+	var modelsDiskBytes int64
+	for _, m := range allModels {
+		modelsDiskBytes += m.Size
+	}
+	gauge("ohmywhisper_models_total", "Total downloaded models", float64(len(allModels)))
+	gauge("ohmywhisper_models_disk_bytes", "Total size of downloaded models in bytes", float64(modelsDiskBytes))
+	gauge("ohmywhisper_models_loaded", "Currently loaded models", float64(len(c.pool.List())))
+
+	stats := sysinfo.Collect()
+	gauge("ohmywhisper_rss_bytes", "Process RAM usage in bytes", float64(stats.RSSMB*1024*1024))
+	gauge("ohmywhisper_cpu_usage_percent", "Process CPU usage percent", stats.CPUPct)
+	gauge("ohmywhisper_cpu_threads", "CPU thread count", float64(sysinfo.CPUThreads()))
+
+	fmt.Fprintf(&sb, "# HELP ohmywhisper_cpu_temp_celsius CPU temperature in Celsius\n# TYPE ohmywhisper_cpu_temp_celsius gauge\n")
+	for zone, temp := range sysinfo.CPUTempCelsius() {
+		fmt.Fprintf(&sb, "ohmywhisper_cpu_temp_celsius{zone=%q} %g\n", zone, temp)
+	}
+
+	gpuCount := 0
+	if stats.GPU != nil {
+		gpuCount = 1
+		gauge("ohmywhisper_gpu_vram_used_bytes", "GPU VRAM used in bytes",
+			float64(stats.GPU.VRAMMB*1024*1024),
+			fmt.Sprintf("name=%q", stats.GPU.Name))
+		gauge("ohmywhisper_gpu_usage_percent", "GPU utilization percent",
+			stats.GPU.Pct,
+			fmt.Sprintf("name=%q", stats.GPU.Name))
+	}
+	gauge("ohmywhisper_gpu_count", "Number of GPUs", float64(gpuCount))
+
+	rxPS, txPS := sysinfo.NetworkSpeed()
+	gauge("ohmywhisper_network_rx_bytes_per_sec", "Network receive bytes per second", float64(rxPS))
+	gauge("ohmywhisper_network_tx_bytes_per_sec", "Network transmit bytes per second", float64(txPS))
+
+	diskUsed, diskFree := sysinfo.DiskStats(c.cfg.ModelDir)
+	gauge("ohmywhisper_disk_used_bytes", "Disk space used in bytes", float64(diskUsed))
+	gauge("ohmywhisper_disk_free_bytes", "Disk space free in bytes", float64(diskFree))
+
+	counter("ohmywhisper_requests_total", "Total API requests received", float64(c.reqTotal.Load()))
+
+	audioMs := c.audioMillis.Load()
+	procMs := c.procMillis.Load()
+	rtf := 0.0
+	if procMs > 0 {
+		rtf = float64(audioMs) / float64(procMs)
+	}
+	gauge("ohmywhisper_processing_speed_rtf", "Audio processing speed ratio (audio secs / proc secs)", rtf)
+
+	ctx.Header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	ctx.String(http.StatusOK, "%s", sb.String())
+}
+
 type psEntry struct {
 	Name  string `json:"name"`
 	Path  string `json:"path"`
@@ -260,9 +402,9 @@ type psEntry struct {
 }
 
 type psResponse struct {
-	Models []psEntry       `json:"models"`
-	RSSMB  int64           `json:"rss_mb"`
-	CPUPct float64         `json:"cpu_pct"`
+	Models []psEntry        `json:"models"`
+	RSSMB  int64            `json:"rss_mb"`
+	CPUPct float64          `json:"cpu_pct"`
 	GPU    *sysinfo.GPUInfo `json:"gpu,omitempty"`
 }
 
@@ -309,6 +451,10 @@ func Serve(c *Client, port int, middleware ...gin.HandlerFunc) error {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
+	r.Use(func(ctx *gin.Context) {
+		c.reqTotal.Add(1)
+		ctx.Next()
+	})
 	for _, m := range middleware {
 		r.Use(m)
 	}
@@ -318,6 +464,9 @@ func Serve(c *Client, port int, middleware ...gin.HandlerFunc) error {
 	r.GET("/api/ps", c.PS)
 	r.POST("/api/load", c.Load)
 	r.DELETE("/api/unload/:name", c.Unload)
+	r.POST("/api/pull", c.PullModel)
+	r.GET("/api/tags", c.Tags)
+	r.GET("/metrics", c.Metrics)
 	return r.Run(fmt.Sprintf("0.0.0.0:%d", port))
 }
 

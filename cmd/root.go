@@ -58,6 +58,8 @@ func init() {
 	rootCmd.AddCommand(createCmd)
 	rootCmd.AddCommand(coverCmd)
 	rootCmd.AddCommand(addCmd)
+	rootCmd.AddCommand(unaddCmd)
+	rootCmd.AddCommand(syncCmd)
 }
 
 func runServe(_ *cobra.Command, _ []string) error {
@@ -80,7 +82,7 @@ func runServe(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	h := api.NewClient(pool)
+	h := api.NewClient(pool, cfg)
 	var mw []gin.HandlerFunc
 	if authToken != "" {
 		mw = append(mw, auth.Bearer(authToken))
@@ -315,15 +317,16 @@ var searchCmd = &cobra.Command{
 		if len(args) > 0 {
 			query = args[0]
 		}
-		results := model.Search(query)
+		cfg, _ := config.Load()
+		results := model.Search(query, cfg)
 		if len(results) == 0 {
 			fmt.Println("no models found")
 			return nil
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "NAME\tSIZE\tDESCRIPTION")
+		fmt.Fprintln(w, "NAME\tSIZE\tSOURCE\tDESCRIPTION")
 		for _, e := range results {
-			fmt.Fprintf(w, "%s\t%s\t%s\n", e.Name, e.Size, e.Desc)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", e.Name, e.Size, e.Source, e.Desc)
 		}
 		w.Flush()
 		return nil
@@ -365,27 +368,83 @@ var coverCmd = &cobra.Command{
 	},
 }
 
+var unaddCmd = &cobra.Command{
+	Use:   "unadd <url>",
+	Short: "Remove a registered model hub URL",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(_ *cobra.Command, args []string) error {
+		normalized := model.NormalizeHub(args[0])
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+		found := false
+		var newHubs []string
+		for _, h := range cfg.ExtraHubs {
+			if model.NormalizeHub(h) == normalized {
+				found = true
+				continue
+			}
+			newHubs = append(newHubs, h)
+		}
+		if !found {
+			return fmt.Errorf("hub not registered: %s", normalized)
+		}
+		cfg.ExtraHubs = newHubs
+		if err := cfg.Save(); err != nil {
+			return err
+		}
+		fmt.Printf("removed hub: %s\n", normalized)
+		return nil
+	},
+}
+
+var syncCmd = &cobra.Command{
+	Use:   "sync",
+	Short: "Sync model catalogs from registered hubs",
+	RunE: func(_ *cobra.Command, _ []string) error {
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+		if len(cfg.ExtraHubs) == 0 {
+			fmt.Println("no extra hubs registered")
+			fmt.Println("use 'ohmywhisper add <url>' to add a hub")
+			return nil
+		}
+		for _, hub := range cfg.ExtraHubs {
+			fmt.Printf("syncing %s ...\n", model.SourceName(model.NormalizeHub(hub)))
+		}
+		n, err := model.SyncAllHubs(cfg)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("synced %d model(s) from %d hub(s)\n", n, len(cfg.ExtraHubs))
+		return nil
+	},
+}
+
 var addCmd = &cobra.Command{
 	Use:   "add <url>",
 	Short: "Register an additional model hub URL",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(_ *cobra.Command, args []string) error {
-		url := args[0]
+		normalized := model.NormalizeHub(args[0])
 		cfg, err := config.Load()
 		if err != nil {
 			return err
 		}
 		for _, h := range cfg.ExtraHubs {
-			if h == url {
-				fmt.Printf("hub already registered: %s\n", url)
+			if model.NormalizeHub(h) == normalized {
+				fmt.Printf("hub already registered: %s\n", normalized)
 				return nil
 			}
 		}
-		cfg.ExtraHubs = append(cfg.ExtraHubs, url)
+		cfg.ExtraHubs = append(cfg.ExtraHubs, normalized)
 		if err := cfg.Save(); err != nil {
 			return err
 		}
-		fmt.Printf("added hub: %s\n", url)
+		fmt.Printf("added hub: %s\n", normalized)
 		return nil
 	},
 }

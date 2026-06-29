@@ -1,12 +1,17 @@
 package model
 
-import "strings"
+import (
+	"strings"
+
+	"ohmywhisper/config"
+)
 
 type CatalogEntry struct {
-	Name string
-	File string
-	Size string
-	Desc string
+	Name   string
+	File   string
+	Size   string
+	Desc   string
+	Source string
 }
 
 var Catalog = []CatalogEntry{
@@ -54,15 +59,27 @@ func FindByName(name string) *CatalogEntry {
 	return nil
 }
 
-func Search(query string) []CatalogEntry {
-	if query == "" {
-		return Catalog
-	}
+func Search(query string, cfg *config.Config) []CatalogEntry {
 	q := strings.ToLower(query)
 	var out []CatalogEntry
 	for _, e := range Catalog {
-		if strings.Contains(strings.ToLower(e.Name), q) || strings.Contains(strings.ToLower(e.Desc), q) {
+		if query == "" || strings.Contains(strings.ToLower(e.Name), q) || strings.Contains(strings.ToLower(e.Desc), q) {
+			e.Source = "ggerganov/whisper.cpp"
 			out = append(out, e)
+		}
+	}
+	for _, ext := range LoadExternalCatalog(cfg) {
+		if query == "" || strings.Contains(strings.ToLower(ext.Name), q) || strings.Contains(strings.ToLower(ext.File), q) {
+			size := ""
+			if ext.SizeBytes > 0 {
+				size = HumanSize(ext.SizeBytes)
+			}
+			out = append(out, CatalogEntry{
+				Name:   ext.Name,
+				File:   ext.File,
+				Size:   size,
+				Source: ext.Source,
+			})
 		}
 	}
 	return out
