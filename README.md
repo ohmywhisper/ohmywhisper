@@ -357,6 +357,8 @@ gpu_device: 0
 `extra_hubs` is populated by `ohmywhisper add` and cleared by `ohmywhisper unadd`. Run `ohmywhisper sync` after adding hubs to populate the local catalog at `~/.ohmywhisper/external_catalog.yml`.
 
 ---
+## credit
+Backend ohmywhisper use [Whisper.cpp](https://github.com/ggml-org/whisper.cpp)
 
 ## Going on
 
