@@ -48,7 +48,8 @@ func doPull(name string, cfg *config.Config, cb func(string, int64, int64)) erro
 
 	for _, ext := range LoadExternalCatalog(cfg) {
 		if ext.Name == name || ext.File == name {
-			destPath := filepath.Join(cfg.ModelDir, ext.File)
+			localFile := ext.Name + ".bin"
+			destPath := filepath.Join(cfg.ModelDir, localFile)
 			if _, err := os.Stat(destPath); err == nil {
 				if cb == nil {
 					fmt.Printf("model %s already downloaded\n", ext.Name)
@@ -59,7 +60,7 @@ func doPull(name string, cfg *config.Config, cb func(string, int64, int64)) erro
 			if cb == nil {
 				fmt.Println("pulling manifest")
 			}
-			return download(url, ext.File, destPath, cb)
+			return download(url, localFile, destPath, cb)
 		}
 	}
 
