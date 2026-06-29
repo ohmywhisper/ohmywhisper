@@ -28,7 +28,10 @@ CMAKE_ARGS=(
 if [ -n "$CC" ]; then CMAKE_ARGS+=("-DCMAKE_C_COMPILER=$CC"); fi
 if [ -n "$CXX" ]; then CMAKE_ARGS+=("-DCMAKE_CXX_COMPILER=$CXX"); fi
 
+GPU_BACKEND="${GPU:-auto}"
+
 if [ -n "$CMAKE_SYSTEM_PROCESSOR" ]; then
+    GPU_BACKEND="cpu"
     CMAKE_ARGS+=(
         "-DCMAKE_SYSTEM_NAME=Linux"
         "-DCMAKE_SYSTEM_PROCESSOR=$CMAKE_SYSTEM_PROCESSOR"
@@ -43,6 +46,42 @@ if [ -n "$CMAKE_SYSTEM_PROCESSOR" ]; then
     )
 fi
 
+if [ "$GPU_BACKEND" = "auto" ]; then
+    if command -v nvcc &>/dev/null || [ -d "/usr/local/cuda" ] || [ -d "/usr/lib/cuda" ]; then
+        GPU_BACKEND="cuda"
+    elif command -v hipcc &>/dev/null || [ -d "/opt/rocm" ]; then
+        GPU_BACKEND="rocm"
+    elif command -v vulkaninfo &>/dev/null || ldconfig -p 2>/dev/null | grep -q libvulkan; then
+        GPU_BACKEND="vulkan"
+    else
+        GPU_BACKEND="cpu"
+    fi
+fi
+
+case "$GPU_BACKEND" in
+cuda)
+    CUDA_PATH="${CUDA_PATH:-/usr/local/cuda}"
+    CMAKE_ARGS+=(
+        "-DGGML_CUDA=ON"
+        "-DCMAKE_CUDA_COMPILER=${CUDA_PATH}/bin/nvcc"
+        "-DCMAKE_CUDA_ARCHITECTURES=native"
+    )
+    echo "GPU: CUDA (${CUDA_PATH})"
+    ;;
+rocm)
+    CMAKE_ARGS+=("-DGGML_HIP=ON")
+    echo "GPU: ROCm/HIP"
+    ;;
+vulkan)
+    CMAKE_ARGS+=("-DGGML_VULKAN=ON")
+    echo "GPU: Vulkan"
+    ;;
+*)
+    echo "GPU: disabled (CPU only)"
+    GPU_BACKEND="cpu"
+    ;;
+esac
+
 cmake -S "$TMP_DIR/whisper.cpp" -B "$TMP_DIR/build" "${CMAKE_ARGS[@]}"
 cmake --build "$TMP_DIR/build" --parallel "$(nproc)"
 
@@ -50,5 +89,6 @@ mkdir -p "$REPO_DIR/lib/include"
 cp "$TMP_DIR/whisper.cpp/include/whisper.h" "$REPO_DIR/lib/include/"
 cp "$TMP_DIR/whisper.cpp/ggml/include/"*.h "$REPO_DIR/lib/include/"
 find "$TMP_DIR/build" -name "*.a" -exec cp {} "$REPO_DIR/lib/" \;
+echo "$GPU_BACKEND" > "$REPO_DIR/lib/gpu_backend"
 
-echo "patched lib from whisper.cpp@$BRANCH"
+echo "patched lib from whisper.cpp@$BRANCH (gpu=$GPU_BACKEND)"

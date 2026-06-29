@@ -34,12 +34,16 @@ var (
 	port      int
 	modelFlag string
 	authToken string
+	noGPU     bool
+	gpuDevice int
 )
 
 func init() {
-	serveCmd.Flags().IntVar(&port, "port", 3199, "port to listen on")
+	serveCmd.Flags().IntVarP(&port, "port", "p", 3199, "port to listen on")
 	serveCmd.Flags().StringVar(&modelFlag, "model", "", "model name or path to preload")
 	serveCmd.Flags().StringVar(&authToken, "token", "", "bearer token for authentication")
+	serveCmd.Flags().BoolVar(&noGPU, "no-gpu", false, "disable GPU acceleration")
+	serveCmd.Flags().IntVar(&gpuDevice, "gpu-device", 0, "GPU device index")
 	createCmd.Flags().StringVarP(&createModelfilePath, "file", "f", "", "path to Modelfile")
 	rootCmd.AddCommand(serveCmd)
 	rootCmd.AddCommand(pullCmd)
@@ -53,6 +57,7 @@ func init() {
 	rootCmd.AddCommand(searchCmd)
 	rootCmd.AddCommand(createCmd)
 	rootCmd.AddCommand(coverCmd)
+	rootCmd.AddCommand(addCmd)
 }
 
 func runServe(_ *cobra.Command, _ []string) error {
@@ -60,6 +65,10 @@ func runServe(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	if noGPU {
+		cfg.GPU = false
+	}
+	cfg.GPUDevice = gpuDevice
 
 	pool := model.NewPool(cfg)
 	defer pool.Close()
@@ -353,6 +362,31 @@ var coverCmd = &cobra.Command{
 			name = args[1]
 		}
 		return model.Convert(args[0], name, cfg)
+	},
+}
+
+var addCmd = &cobra.Command{
+	Use:   "add <url>",
+	Short: "Register an additional model hub URL",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(_ *cobra.Command, args []string) error {
+		url := args[0]
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+		for _, h := range cfg.ExtraHubs {
+			if h == url {
+				fmt.Printf("hub already registered: %s\n", url)
+				return nil
+			}
+		}
+		cfg.ExtraHubs = append(cfg.ExtraHubs, url)
+		if err := cfg.Save(); err != nil {
+			return err
+		}
+		fmt.Printf("added hub: %s\n", url)
+		return nil
 	},
 }
 

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -109,6 +110,11 @@ func (c *Client) transcribeAudio(ctx *gin.Context, translate bool) {
 
 	samples := bytesToFloat32(pcmData)
 
+	if ctx.PostForm("stream") == "true" {
+		c.streamSegments(ctx, translate, engine, samples, lang, wordTS)
+		return
+	}
+
 	var (
 		text string
 		segs []whisperlib.Segment
@@ -165,6 +171,61 @@ func (c *Client) transcribeAudio(ctx *gin.Context, translate bool) {
 	default:
 		ctx.JSON(http.StatusOK, format.TranscriptionResponse{Text: text})
 	}
+}
+
+func (c *Client) streamSegments(ctx *gin.Context, translate bool, engine *whisperlib.Engine, samples []float32, lang string, wordTS bool) {
+	ctx.Header("Content-Type", "text/event-stream")
+	ctx.Header("Cache-Control", "no-cache")
+	ctx.Header("Connection", "keep-alive")
+	ctx.Header("X-Accel-Buffering", "no")
+	ctx.Writer.WriteHeader(http.StatusOK)
+
+	var full strings.Builder
+
+	send := func(v any) {
+		b, _ := json.Marshal(v)
+		fmt.Fprintf(ctx.Writer, "data: %s\n\n", b)
+		ctx.Writer.Flush()
+	}
+
+	cb := func(seg whisperlib.Segment) {
+		full.WriteString(seg.Text)
+		ev := map[string]any{
+			"type":  "segment",
+			"id":    seg.ID,
+			"start": seg.Start,
+			"end":   seg.End,
+			"text":  seg.Text,
+		}
+		if wordTS && len(seg.Words) > 0 {
+			words := make([]map[string]any, len(seg.Words))
+			for i, w := range seg.Words {
+				words[i] = map[string]any{"word": w.Word, "start": w.Start, "end": w.End}
+			}
+			ev["words"] = words
+		}
+		send(ev)
+	}
+
+	var err error
+	if translate {
+		err = engine.TranslateStream(samples, wordTS, cb)
+	} else {
+		err = engine.TranscribeStream(samples, lang, wordTS, cb)
+	}
+
+	if err != nil {
+		send(map[string]any{"type": "error", "error": err.Error()})
+		return
+	}
+
+	duration := float64(len(samples)) / 16000.0
+	send(map[string]any{
+		"type":     "done",
+		"text":     strings.TrimSpace(full.String()),
+		"language": lang,
+		"duration": duration,
+	})
 }
 
 func (c *Client) Transcribe(ctx *gin.Context) {

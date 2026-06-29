@@ -39,7 +39,7 @@ func (p *Pool) LoadPath(name, path string) error {
 	if _, ok := p.models[name]; ok {
 		return nil
 	}
-	e, err := whisperlib.NewEngine(path)
+	e, err := whisperlib.NewEngine(path, p.cfg.GPU, p.cfg.GPUDevice)
 	if err != nil {
 		return err
 	}

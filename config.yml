@@ -1,4 +1,6 @@
 model_dir: ~/.ohmywhisper/models
 hub: https://huggingface.co/ggerganov/whisper.cpp/resolve/main
-server_url: http://localhost:3199
+server_url: http://0.0.0.0:3199
 whisper_src: ""
+gpu: true
+gpu_device: 0

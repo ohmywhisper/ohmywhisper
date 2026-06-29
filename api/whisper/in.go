@@ -40,12 +40,13 @@ type Engine struct {
 	mu           sync.Mutex
 }
 
-func NewEngine(modelPath string) (*Engine, error) {
+func NewEngine(modelPath string, gpu bool, gpuDevice int) (*Engine, error) {
 	cPath := C.CString(modelPath)
 	defer C.free(unsafe.Pointer(cPath))
 
 	cparams := C.whisper_context_default_params()
-	cparams.use_gpu = C.bool(false)
+	cparams.use_gpu = C.bool(gpu)
+	cparams.gpu_device = C.int(gpuDevice)
 
 	ctx := C.whisper_init_from_file_with_params(cPath, cparams)
 	if ctx == nil {
@@ -82,6 +83,42 @@ func (e *Engine) Translate(samples []float32, wordTS bool) (string, []Segment, e
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.run(samples, "", true, wordTS)
+}
+
+func (e *Engine) TranscribeStream(samples []float32, lang string, wordTS bool, cb func(Segment)) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.runStream(samples, lang, false, wordTS, cb)
+}
+
+func (e *Engine) TranslateStream(samples []float32, wordTS bool, cb func(Segment)) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.runStream(samples, "", true, wordTS, cb)
+}
+
+func (e *Engine) runStream(samples []float32, lang string, translate bool, wordTS bool, cb func(Segment)) error {
+	if len(samples) == 0 {
+		return nil
+	}
+	var timeOff float64
+	segID := 0
+	for i := 0; i < len(samples); i += chunkSamples {
+		end := i + chunkSamples
+		if end > len(samples) {
+			end = len(samples)
+		}
+		chunk := samples[i:end]
+		_, segs, err := e.process(chunk, lang, translate, wordTS, timeOff, &segID)
+		if err != nil {
+			return err
+		}
+		for _, seg := range segs {
+			cb(seg)
+		}
+		timeOff += float64(len(chunk)) / sampleRate
+	}
+	return nil
 }
 
 func (e *Engine) run(samples []float32, lang string, translate bool, wordTS bool) (string, []Segment, error) {

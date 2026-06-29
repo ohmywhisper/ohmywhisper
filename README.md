@@ -88,6 +88,18 @@ With a preloaded model and auth token:
 ohmywhisper serve --model small --port 3199 --token secret
 ```
 
+Force CPU-only (disable GPU):
+
+```sh
+ohmywhisper serve --no-gpu
+```
+
+Select a specific GPU on multi-GPU systems:
+
+```sh
+ohmywhisper serve --gpu-device 1
+```
+
 ### Load / unload at runtime
 
 ```sh
@@ -133,6 +145,29 @@ curl http://localhost:3199/v1/audio/translations \
   -F file=@audio.mp3 \
   -F model=large-v3-turbo-q5_0
 ```
+
+### Streaming
+
+Add `stream=true` to receive segments as Server-Sent Events while the audio is being processed:
+
+```sh
+curl -N http://localhost:3199/v1/audio/transcriptions \
+  -F file=@audio.mp3 \
+  -F model=small \
+  -F stream=true
+```
+
+Each SSE event is a JSON object:
+
+```
+data: {"type":"segment","id":0,"start":0.00,"end":3.20,"text":" Hello, how are you?"}
+
+data: {"type":"segment","id":1,"start":3.20,"end":6.50,"text":" I am doing well."}
+
+data: {"type":"done","text":"Hello, how are you? I am doing well.","duration":6.5}
+```
+
+Works on both `/v1/audio/transcriptions` and `/v1/audio/translations`. Combine with `timestamp_granularities[]=word` to include word timestamps in each segment event.
 
 ### List loaded models
 
@@ -200,12 +235,14 @@ Requires `whisper_src` set in `~/.ohmywhisper/config.yml` pointing to a whisper.
 ```yaml
 model_dir: ~/.ohmywhisper/models
 hub: https://huggingface.co/ggerganov/whisper.cpp/resolve/main
-server_url: http://localhost:3199
+server_url: http://0.0.0.0:3199
 whisper_src: ""
+gpu: true
+gpu_device: 0
 ```
 
 ---
 
 ## Going on
 
-- Streaming response
+- .......
